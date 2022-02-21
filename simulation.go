@@ -26,6 +26,26 @@ type Simulation struct {
 
 	// nextID holds the next ID for scheduling a new event.
 	nextID uint64
+
+	heapPushChan chan heapPushChanMsg
+	heapPopChan  chan heapPopChanMsg
+	quitChanel   chan bool
+}
+
+func NewSimulation() Simulation {
+	heapPushChan := make(chan heapPushChanMsg)
+	heapPopChan := make(chan heapPopChanMsg)
+	quitChanel := make(chan bool)
+	watchHeapOps(heapPushChan, heapPopChan, quitChanel)
+	return Simulation{
+		heapPushChan: heapPushChan,
+		heapPopChan:  heapPopChan,
+		quitChanel:   quitChanel,
+	}
+}
+
+func (sim *Simulation) Close() {
+	sim.quitChanel <- true
 }
 
 // Now returns the current simulation time.
@@ -193,7 +213,7 @@ func (sim *Simulation) Step() bool {
 		return false
 	}
 
-	qe := heap.Pop(&sim.eq).(queuedEvent)
+	qe := sim.heapPop(&sim.eq).(queuedEvent)
 	sim.now = qe.time
 	qe.ev.process()
 
@@ -202,6 +222,7 @@ func (sim *Simulation) Step() bool {
 
 // Run runs the simulation until the event queue is empty.
 func (sim *Simulation) Run() {
+	defer sim.Close()
 	for sim.Step() {
 	}
 }
@@ -215,6 +236,7 @@ func (sim *Simulation) RunUntil(target float64) {
 	if target < sim.Now() {
 		panic(fmt.Sprintf("(*Simulation).RunUntil: target must not be smaller than the current simulation time: %f < %f\n", target, sim.Now()))
 	}
+	defer sim.Close()
 
 	for len(sim.eq) > 0 && sim.eq[0].time < target {
 		sim.Step()
@@ -226,10 +248,59 @@ func (sim *Simulation) RunUntil(target float64) {
 // schedule schedules the given event to be processed after the given delay.
 // Adds the event to the event queue.
 func (sim *Simulation) schedule(ev *Event, delay float64) {
-	heap.Push(&sim.eq, queuedEvent{
+	sim.heapPush(&sim.eq, queuedEvent{
 		ev:   ev,
 		time: sim.Now() + delay,
 		id:   sim.nextID,
 	})
 	sim.nextID++
+}
+
+// heapPopChanMsg - the message structure for a pop chan
+type heapPopChanMsg struct {
+	h      heap.Interface
+	result chan interface{}
+}
+
+// heapPushChanMsg - the message structure for a push chan
+type heapPushChanMsg struct {
+	h heap.Interface
+	x interface{}
+}
+
+// HeapPush - safely push item to a heap interface
+func (sim *Simulation) heapPush(h heap.Interface, x interface{}) {
+	sim.heapPushChan <- heapPushChanMsg{
+		h: h,
+		x: x,
+	}
+}
+
+// HeapPop - safely pop item from a heap interface
+func (sim *Simulation) heapPop(h heap.Interface) interface{} {
+	var result = make(chan interface{})
+	sim.heapPopChan <- heapPopChanMsg{
+		h:      h,
+		result: result,
+	}
+	return <-result
+}
+
+// watchHeapOps - watch for push/pops to our heap, and serializing the operations
+// with channels
+func watchHeapOps(heapPushChan chan heapPushChanMsg, heapPopChan chan heapPopChanMsg, quitChan chan bool) {
+	go func() {
+		for {
+			select {
+			case <-quitChan:
+				// TODO: update to quit gracefully
+				// TODO: maybe need to dump state somewhere?
+				return
+			case popMsg := <-heapPopChan:
+				popMsg.result <- heap.Pop(popMsg.h)
+			case pushMsg := <-heapPushChan:
+				heap.Push(pushMsg.h, pushMsg.x)
+			}
+		}
+	}()
 }
