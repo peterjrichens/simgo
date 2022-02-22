@@ -1,3 +1,3 @@
-module github.com/peterjrichens/simgo
+module github.com/fschuetz04/simgo
 
 go 1.16
